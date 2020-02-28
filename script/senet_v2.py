@@ -458,8 +458,6 @@ def initialize_pretrained_model(model, num_classes, settings):
 #     model.input_range = settings['input_range']
 #     model.mean = settings['mean']
 #     model.std = settings['std']
-    ##use generalized mean pooling instead of nn.AdaptiveAvgPool2d
-    model.avg_pool = GeM()
 
 def gem(x, p=3, eps=1e-6):
     return F.avg_pool2d(x.clamp(min=eps).pow(p), (x.size(-2), x.size(-1))).pow(1./p)
@@ -524,6 +522,9 @@ def se_resnext50_32x4d(num_classes=1000, pretrained='imagenet', debug=False):
     if pretrained is not None:
         settings = pretrained_settings['se_resnext50_32x4d'][pretrained]
         initialize_pretrained_model(model, num_classes, settings)
+    ##use generalized mean pooling instead of nn.AdaptiveAvgPool2d
+    model.avg_pool = GeM()
+
     return model
 
 
