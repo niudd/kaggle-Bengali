@@ -8,6 +8,7 @@ import math
 
 import torch
 import torch.nn as nn
+from torch.nn import functional as F
 from torch.utils import model_zoo
 
 __all__ = ['SENet', 'senet154', 'se_resnet50', 'se_resnet101', 'se_resnet152',
@@ -209,7 +210,7 @@ class SENet(nn.Module):
 
     def __init__(self, block, layers, groups, reduction, dropout_p=0.2,
                  inplanes=128, input_3x3=True, downsample_kernel_size=3,
-                 downsample_padding=1, num_classes=1000):
+                 downsample_padding=1, num_classes=1000, debug=False):
         """
         Parameters
         ----------
@@ -255,6 +256,7 @@ class SENet(nn.Module):
         """
         super(SENet, self).__init__()
         self.inplanes = inplanes
+        self.debug = debug
         if input_3x3:
             layer0_modules = [
                 ('conv1', nn.Conv2d(3, 64, 3, stride=2, padding=1,
@@ -286,11 +288,13 @@ class SENet(nn.Module):
             block,
             planes=64,
             blocks=layers[0],
+            stride=1,
             groups=groups,
             reduction=reduction,
             downsample_kernel_size=1,
             downsample_padding=0
         )
+        #self.layer1 = nn.Sequential(self.layer1, nn.MaxPool2d(kernel_size=2, stride=2))
         self.layer2 = self._make_layer(
             block,
             planes=128,
@@ -301,6 +305,7 @@ class SENet(nn.Module):
             downsample_kernel_size=downsample_kernel_size,
             downsample_padding=downsample_padding
         )
+        #self.layer2 = nn.Sequential(self.layer2, nn.MaxPool2d(kernel_size=2, stride=2))
         self.layer3 = self._make_layer(
             block,
             planes=256,
@@ -311,6 +316,7 @@ class SENet(nn.Module):
             downsample_kernel_size=downsample_kernel_size,
             downsample_padding=downsample_padding
         )
+        #self.layer3 = nn.Sequential(self.layer3, nn.MaxPool2d(kernel_size=2, stride=2))
         self.layer4 = self._make_layer(
             block,
             planes=512,
@@ -321,45 +327,72 @@ class SENet(nn.Module):
             downsample_kernel_size=downsample_kernel_size,
             downsample_padding=downsample_padding
         )
+        #self.layer4 = nn.Sequential(self.layer4, nn.MaxPool2d(kernel_size=2, stride=2))
         #self.avg_pool = nn.AvgPool2d(7, stride=1)##features:  torch.Size([32, 2048, 5, 8])
+        
         self.avg_pool = nn.AdaptiveAvgPool2d(output_size=(1,1))
-        self.dropout = nn.Dropout(dropout_p) if dropout_p is not None else None
-        self.last_linear = nn.Linear(512 * block.expansion, num_classes)
+        #self.max_pool = nn.AdaptiveMaxPool2d(output_size=(1,1))
+        self.dropout = nn.Dropout(0.2)
+        self.last_linear = nn.Sequential(
+            nn.Linear(512 * block.expansion, 512),#in_ch=2048
+            nn.BatchNorm1d(512),
+            nn.LeakyReLU(inplace=True),
+            nn.Dropout(0.2),
+            nn.Linear(512, num_classes),#out_ch=186
+            nn.BatchNorm1d(num_classes),
+        )
 
     def _make_layer(self, block, planes, blocks, groups, reduction, stride=1,
                     downsample_kernel_size=1, downsample_padding=0):
         downsample = None
-        if stride != 1 or self.inplanes != planes * block.expansion:
+        if self.inplanes != planes * block.expansion:
             downsample = nn.Sequential(
                 nn.Conv2d(self.inplanes, planes * block.expansion,
-                          kernel_size=downsample_kernel_size, stride=stride,
+                          kernel_size=downsample_kernel_size, stride=1,
                           padding=downsample_padding, bias=False),
                 nn.BatchNorm2d(planes * block.expansion),
             )
 
         layers = []
-        layers.append(block(self.inplanes, planes, groups, reduction, stride,
-                            downsample))
+        layers.append(block(self.inplanes, planes, groups, reduction, downsample=downsample))
         self.inplanes = planes * block.expansion
         for i in range(1, blocks):
             layers.append(block(self.inplanes, planes, groups, reduction))
-
+        if stride == 2:
+            layers.append(nn.MaxPool2d(kernel_size=2, stride=2))
         return nn.Sequential(*layers)
 
     def features(self, x):
         x = self.layer0(x)
+        if self.debug:
+            print("layer0: ", x.size())
         x = self.layer1(x)
+        if self.debug:
+            print("layer1: ", x.size())
         x = self.layer2(x)
+        if self.debug:
+            print("layer2: ", x.size())
         x = self.layer3(x)
+        if self.debug:
+            print("layer3: ", x.size())
         x = self.layer4(x)
+        if self.debug:
+            print("layer4: ", x.size())
         return x
 
     def logits(self, x):
-        x = self.avg_pool(x)
-        if self.dropout is not None:
-            x = self.dropout(x)
-        x = x.view(x.size(0), -1)
-        x = self.last_linear(x)
+        x_avg = self.avg_pool(x)
+        #x_max = self.max_pool(x)
+        
+        x_avg = x_avg.view(x_avg.size(0), -1)
+        if self.debug:
+            print("avg_pool: ", x_avg.size())
+        #x_max = x_max.view(x_max.size(0), -1)
+        #x_concat = torch.cat((x_avg, x_max), dim=1)
+        #x_concat = self.dropout(x_concat)
+        x_avg = self.dropout(x_avg)
+        
+        x = self.last_linear(x_avg)
         return x
 
     def forward(self, x):
@@ -398,6 +431,8 @@ def initialize_pretrained_model(model, num_classes, settings):
 #     model.input_range = settings['input_range']
 #     model.mean = settings['mean']
 #     model.std = settings['std']
+    ##use generalized mean pooling instead of nn.AdaptiveAvgPool2d
+    #model.avg_pool = GeM()
 
 
 def senet154(num_classes=1000, pretrained='imagenet'):
@@ -442,11 +477,11 @@ def se_resnet152(num_classes=1000, pretrained='imagenet'):
     return model
 
 
-def se_resnext50_32x4d(num_classes=1000, pretrained='imagenet'):
+def se_resnext50_32x4d(num_classes=1000, pretrained='imagenet', debug=False):
     model = SENet(SEResNeXtBottleneck, [3, 4, 6, 3], groups=32, reduction=16,
                   dropout_p=None, inplanes=64, input_3x3=False,
                   downsample_kernel_size=1, downsample_padding=0,
-                  num_classes=num_classes)
+                  num_classes=num_classes, debug=debug)
     if pretrained is not None:
         settings = pretrained_settings['se_resnext50_32x4d'][pretrained]
         initialize_pretrained_model(model, num_classes, settings)
